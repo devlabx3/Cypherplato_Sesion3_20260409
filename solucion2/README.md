@@ -1,0 +1,1 @@
+Solucion local con Chromadb
