@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { UploadCloud, FileText, CheckCircle2, Loader2, X, Trash2 } from "lucide-react";
-import { uploadToGoogleAI, deleteAllFilesFromGoogleAI } from "@/actions/googleAi";
+import { addDocumentToVectorStore, clearVectorStore } from "@/actions/localAi";
 
 interface CorpusZoneProps {
   corpusFiles: {uri: string, displayName: string, name: string}[];
@@ -24,7 +24,7 @@ export default function CorpusZone({ corpusFiles, setCorpusFiles }: CorpusZonePr
     formData.append("file", file);
 
     try {
-      const result = await uploadToGoogleAI(formData);
+      const result = await addDocumentToVectorStore(formData);
       if (result.success && result.uri) {
         setCorpusFiles((prev) => [...prev, { uri: result.uri!, displayName: result.displayName || "Documento", name: result.fileId! }]);
       } else {
@@ -49,7 +49,7 @@ export default function CorpusZone({ corpusFiles, setCorpusFiles }: CorpusZonePr
     setIsDeleting(true);
     setError(null);
     try {
-      const result = await deleteAllFilesFromGoogleAI();
+      const result = await clearVectorStore();
       if (result.success) {
         setCorpusFiles([]); // Limpia la UI localmente
         alert(`Se han eliminado ${result.count} archivos correctamente de la nube.`);

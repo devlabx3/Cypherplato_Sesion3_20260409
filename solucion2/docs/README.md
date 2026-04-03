@@ -1,17 +1,62 @@
-# Documentación Solución 2
+# Solución 2 — Validador de Propuestas Platohedro
 
-Esta carpeta contiene la documentación sobre la implementación de RAG híbrido usando ChromaDB, memoria del servidor y Gemini 2.5 Flash Lite.
+Aplicación Next.js que evalúa borradores de propuestas PDF comparándolos contra un corpus de documentos aprobados, usando RAG híbrido con ChromaDB y Gemini 2.5 Flash Lite.
+
+## Qué hace
+
+1. **Corpus:** el administrador sube PDFs de propuestas ganadoras. Se procesan, vectorizan y persisten en ChromaDB.
+2. **Borrador:** el usuario sube su propuesta en PDF. Se vectoriza y guarda solo en memoria RAM (nunca toca ChromaDB).
+3. **Análisis:** la app busca en el corpus los fragmentos más relevantes al borrador y le pide a Gemini que evalúe 4 pilares con puntuación 0-100.
+4. **Chat:** tras el análisis, el usuario puede hacer preguntas libres; el sistema recupera contexto del borrador y del corpus para responder.
+
+## Requisitos previos
+
+- Node.js 20+
+- Docker (para ChromaDB)
+- API Key de Google Gemini con acceso a `gemini-2.5-flash-lite` y `gemini-embedding-001`
+
+## Puesta en marcha
+
+**1. Variables de entorno**
+
+Crear un archivo `.env.local` en la raíz de `solucion2/`:
+
+```
+GOOGLE_API_KEY=tu_api_key_aquí
+```
+
+**2. Levantar ChromaDB**
+
+```bash
+docker compose up -d
+```
+
+ChromaDB quedará disponible en `http://localhost:8000`.
+
+**3. Instalar dependencias**
+
+```bash
+npm install
+```
+
+**4. Iniciar la app**
+
+```bash
+npm run dev
+```
+
+Abrir [http://localhost:3000](http://localhost:3000).
 
 ## Arquitectura
 
-- **Base de Datos Vectorial (Corpus)**: `chromadb` v3 corriendo en Docker (`localhost:8000`). Almacena los documentos de referencia aprobados de forma persistente.
-- **Almacenamiento del Borrador**: `Map` en memoria del servidor (`draftStore`). El borrador/licitación a evaluar se guarda solo en RAM — nunca toca ChromaDB.
-- **Procesamiento de PDF**: `pdf-parse` v1.1.1 para extracción de texto + `RecursiveCharacterTextSplitter` de `@langchain/textsplitters` para chunking.
-- **Embeddings**: `gemini-embedding-001` vía SDK directo `@google/generative-ai`. No se usa el wrapper `@langchain/google-genai` (presenta bug que retorna vectores vacíos).
-- **Búsqueda semántica en borrador**: Cosine similarity implementada localmente sobre los chunks en memoria.
-- **Generación Textual**: `gemini-2.5-flash-lite` a través del SDK `@google/generative-ai`.
+- **Base de Datos Vectorial (Corpus):** ChromaDB v3 en Docker (`localhost:8000`). Almacena propuestas aprobadas de forma persistente en la colección `rag_corpus`.
+- **Almacenamiento del Borrador:** `Map` en memoria del servidor (`draftStore`). El borrador se guarda solo en RAM — nunca toca ChromaDB — y se pierde al reiniciar el proceso.
+- **Procesamiento de PDF:** `pdf-parse` v1.1.1 para extracción de texto + `RecursiveCharacterTextSplitter` de `@langchain/textsplitters` para chunking (1000 chars, overlap 200).
+- **Embeddings:** `gemini-embedding-001` vía SDK directo `@google/generative-ai`. `@langchain/google-genai` no forma parte del proyecto (fue removido por un bug que retornaba vectores vacíos).
+- **Búsqueda semántica en borrador:** cosine similarity implementada localmente sobre los chunks en memoria.
+- **Generación textual:** `gemini-2.5-flash-lite` a través del SDK `@google/generative-ai`.
 
-## Archivos de documentación
+## Documentación adicional
 
 - [architecture-spec.md](architecture-spec.md) — Flujo completo del sistema RAG híbrido.
 - [tech-spec.md](tech-spec.md) — Dependencias, configuración y patrones de código.

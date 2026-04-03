@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Upload, AlertCircle, FileText, CheckCircle, Search, Loader2, MessageSquare, Send } from "lucide-react";
-import { uploadDraft, analyzeDraft, chatWithModel } from "@/actions/googleAi";
+import { uploadDraft, analyzeDraft, chatWithModel } from "@/actions/localAi";
 
 interface AnalyzerZoneProps {
   corpusUris: string[];

@@ -6,7 +6,7 @@
 npm install chromadb @google/generative-ai @langchain/textsplitters pdf-parse@1.1.1
 ```
 
-> **Nota:** `@langchain/google-genai` está instalado pero **no se usa para embeddings** — presenta un bug donde `embedDocuments()` retorna arrays vacíos. Se usa el SDK directo `@google/generative-ai`.
+> Los embeddings se generan con el SDK directo `@google/generative-ai`. `@langchain/google-genai` **no forma parte del proyecto** — fue removido porque `embedDocuments()` retornaba arrays vacíos.
 
 ## next.config.ts
 

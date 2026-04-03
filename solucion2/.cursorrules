@@ -16,7 +16,7 @@
    - En análisis y chat, el contexto se construye combinando fragmentos del borrador (memoria) y del corpus (ChromaDB).
 
 3. **Restricciones Técnicas**:
-   - Todo el proceso vectorial y de IA debe ocurrir en Server Actions (`"use server"`), en `src/actions/googleAi.ts`.
+   - Todo el proceso vectorial y de IA debe ocurrir en Server Actions (`"use server"`), en `src/actions/localAi.ts`.
    - `pdf-parse` debe estar en `serverExternalPackages` en `next.config.ts`.
    - No usar `@langchain/google-genai` para embeddings — usar el SDK directo `@google/generative-ai`.
    - No usar `require()` dinámico — usar `import` estático.

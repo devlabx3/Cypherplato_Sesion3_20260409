@@ -1,7 +1,7 @@
 "use server";
 
 /**
- * googleAi.ts — Capa de acceso a IA y base vectorial
+ * localAi.ts — Capa de acceso a IA y base vectorial
  *
  * Este archivo centraliza toda la lógica de backend relacionada con:
  *   1. Procesamiento de PDFs (extracción de texto y fragmentación)
@@ -145,7 +145,7 @@ export async function checkGeminiConnection() {
  * Todos los chunks de un mismo archivo comparten el mismo `fileId` en sus
  * metadatos, lo que permite filtrar por archivo en búsquedas posteriores.
  */
-export async function uploadToGoogleAI(formData: FormData) {
+export async function addDocumentToVectorStore(formData: FormData) {
   try {
     const file = formData.get("file") as File;
     if (!file) throw new Error("No file provided");
@@ -189,12 +189,12 @@ export async function uploadToGoogleAI(formData: FormData) {
       documents: texts,
     });
 
-    // Simulamos la respuesta de la GoogleAI API pero retornando nuestros IDs
+    // Retornamos fileId como "uri" para compatibilidad con el frontend
     return {
       success: true,
       fileId: fileId,
       displayName: file.name,
-      uri: fileId, // Retornamos fileId como "uri" para retrocompatibilidad con el front
+      uri: fileId,
     };
   } catch (error: any) {
     console.error("Error uploading to Chroma:", error);
@@ -205,7 +205,7 @@ export async function uploadToGoogleAI(formData: FormData) {
 /**
  * Procesa un PDF borrador y lo guarda en memoria (NO en ChromaDB).
  *
- * Funciona igual que uploadToGoogleAI pero almacena en draftStore (RAM).
+ * Funciona igual que addDocumentToVectorStore pero almacena en draftStore (RAM).
  * Esto mantiene los borradores separados del corpus de referencia.
  *
  * Retorna un draftId que el frontend usa como identificador temporal.
@@ -249,7 +249,7 @@ export async function uploadDraft(formData: FormData) {
  * El frontend usa esta lista para que el usuario seleccione qué documentos
  * del corpus usar como referencia al analizar un borrador.
  */
-export async function listGoogleAIFiles() {
+export async function listVectorStoreDocuments() {
   try {
     const collection = await chromaClient.getOrCreateCollection({ name: "rag_corpus" });
     const results = await collection.get({
@@ -285,7 +285,7 @@ export async function listGoogleAIFiles() {
  *
  * Nota: los borradores en memoria (draftStore) no se ven afectados.
  */
-export async function deleteAllFilesFromGoogleAI() {
+export async function clearVectorStore() {
   try {
     await chromaClient.deleteCollection({ name: "rag_corpus" });
     return { success: true, count: 1 };
@@ -353,7 +353,7 @@ Eres un evaluador de la organización Platohedro.
 Estás validando una nueva propuesta (borrador: ${draftName}).
 A continuación, te proporciono fragmentos de documentos aprobados previamente ("corpus") y el texto del Borrador:
 
---INICIO CORPUS DE ÉXITO PAA CONTEXTO--
+--INICIO CORPUS DE ÉXITO PARA CONTEXTO--
 ${corpusContext}
 --FIN CORPUS DE ÉXITO--
 

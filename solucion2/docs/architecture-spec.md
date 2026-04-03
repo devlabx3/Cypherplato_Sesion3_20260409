@@ -12,7 +12,7 @@ El sistema usa **dos almacenes distintos** según el tipo de documento:
 ## Flujo de Trabajo
 
 1. **Gestión de Conocimiento (Corpus):**
-   - El Admin sube los PDFs de licitaciones ganadoras via `CorpusZone` → `uploadToGoogleAI()`.
+   - El Admin sube los PDFs de licitaciones ganadoras via `CorpusZone` → `addDocumentToVectorStore()`.
    - El texto se extrae con `pdf-parse`, se divide en chunks con `RecursiveCharacterTextSplitter` (1000 chars, overlap 200).
    - Se generan embeddings con `gemini-embedding-001` y se indexan en ChromaDB (colección `rag_corpus`).
    - La lista de documentos del corpus se recupera leyendo los metadatos de ChromaDB al cargar la app.
@@ -35,5 +35,5 @@ El sistema usa **dos almacenes distintos** según el tipo de documento:
    - Combina ambos contextos e invoca a `gemini-2.5-flash-lite`.
 
 5. **Gestión y Limpieza del Corpus:**
-   - El botón "Vaciar Nube" llama a `deleteAllFilesFromGoogleAI()` que ejecuta `chromaClient.deleteCollection("rag_corpus")`.
+   - El botón "Vaciar Nube" llama a `clearVectorStore()` que ejecuta `chromaClient.deleteCollection("rag_corpus")`.
    - El borrador en memoria se descarta automáticamente al subir uno nuevo o al reiniciar el servidor.

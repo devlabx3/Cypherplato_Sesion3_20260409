@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import CorpusZone from "@/components/CorpusZone";
 import AnalyzerZone from "@/components/AnalyzerZone";
 import { Sparkles, Activity } from "lucide-react";
-import { checkGeminiConnection, listGoogleAIFiles } from "@/actions/googleAi";
+import { checkGeminiConnection, listVectorStoreDocuments } from "@/actions/localAi";
 
 export default function Home() {
   // Estado elevado para que ambos componentes puedan interactuar si fuera necesario
@@ -18,7 +18,7 @@ export default function Home() {
       if (res.success) {
         setConnectionStatus("connected");
         // Una vez comprobada la conexión, cargamos los archivos del RAG
-        const filesRes = await listGoogleAIFiles();
+        const filesRes = await listVectorStoreDocuments();
         if (filesRes.success && filesRes.files) {
           setCorpusFiles(filesRes.files);
         }
