@@ -1,0 +1,55 @@
+# ============================================================
+# .gitignore raíz — CypherplatoSesion3
+# Aplica a solucion1/, solucion2/ y solucion3/
+# ============================================================
+
+# --- Dependencias ---
+**/node_modules/
+**/.pnp
+**/.pnp.*
+**/.yarn/*
+!**/.yarn/patches
+!**/.yarn/plugins
+!**/.yarn/releases
+!**/.yarn/versions
+
+# --- Build / Output de Next.js ---
+**/.next/
+**/out/
+**/build/
+**/*.tsbuildinfo
+**/next-env.d.ts
+
+# --- Testing ---
+**/coverage/
+
+# --- Variables de entorno (NUNCA subir claves) ---
+**/.env
+**/.env.*
+!**/.env.example
+
+# --- Logs de depuración ---
+**/npm-debug.log*
+**/yarn-debug.log*
+**/yarn-error.log*
+**/.pnpm-debug.log*
+
+# --- Docker volumes / datos persistentes de ChromaDB ---
+**/chroma-data/
+**/chroma_data/
+
+# --- Archivos de IDE y sistema operativo ---
+**/.DS_Store
+**/*.pem
+**/.vscode/
+**/.idea/
+
+# --- Claude Code / Cursor (configuración local del desarrollador) ---
+**/.claude/settings.local.json
+**/.cursorrules
+
+# --- Vercel ---
+**/.vercel/
+
+# --- Lock de skills (específico de Claude Code, no compartible) ---
+**/skills-lock.json
