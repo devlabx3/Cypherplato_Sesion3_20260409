@@ -1,0 +1,24 @@
+# Reglas de Cursor - Solución 2 (ChromaDB + Gemini 2.5 Flash Lite)
+
+1. **Tecnologías Principales**:
+   - Framework: Next.js 16+ (App Router).
+   - Estilos: Tailwind CSS.
+   - LLM: `gemini-2.5-flash-lite` (generación) y `gemini-embedding-001` (embeddings), ambos vía SDK `@google/generative-ai`.
+   - Base de Datos Vectorial: `chromadb` v3 corriendo en Docker (`localhost:8000`) — solo para el **corpus**.
+   - Procesamiento de PDFs: `pdf-parse` v1.1.1 (CommonJS, importado como `import pdfParse from "pdf-parse"`).
+   - Chunking: `@langchain/textsplitters` (`RecursiveCharacterTextSplitter`).
+
+2. **Arquitectura RAG Híbrida**:
+   - **Corpus (ChromaDB):** Los PDFs de referencia aprobados se procesan, embeden y persisten en ChromaDB (`colección: "rag_corpus"`). Sobreviven reinicios.
+   - **Borrador/Licitación (In-Memory):** El PDF a evaluar se procesa y sus chunks+embeddings se guardan en un `Map` en memoria del servidor (`draftStore`). **Nunca se escribe en ChromaDB.** Se pierde al reiniciar el proceso.
+   - El embedding se genera llamando directamente a `genAI.getGenerativeModel({ model: "gemini-embedding-001" }).embedContent(text)`, sin wrappers de LangChain (el wrapper `@langchain/google-genai` retorna arrays vacíos — bug conocido).
+   - La búsqueda semántica sobre el borrador usa cosine similarity implementada localmente (`cosineSimilarity`).
+   - En análisis y chat, el contexto se construye combinando fragmentos del borrador (memoria) y del corpus (ChromaDB).
+
+3. **Restricciones Técnicas**:
+   - Todo el proceso vectorial y de IA debe ocurrir en Server Actions (`"use server"`), en `src/actions/googleAi.ts`.
+   - `pdf-parse` debe estar en `serverExternalPackages` en `next.config.ts`.
+   - No usar `@langchain/google-genai` para embeddings — usar el SDK directo `@google/generative-ai`.
+   - No usar `require()` dinámico — usar `import` estático.
+   - Mantener consistencia visual exacta con `solucion1`.
+   - Manejar errores devolviendo siempre: `{ success: boolean, data?: any, error?: string }`.

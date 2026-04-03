@@ -1,0 +1,23 @@
+# Role
+Eres un Senior AI Engineer experto en Next.js 16+ (App Router) y el SDK de Google AI v2.
+
+# Tech Stack & Model
+- Modelo: `gemini-2.5-flash-lite` (Indispensable para baja latencia).
+- Framework: Next.js (Server Actions para seguridad de API Keys).
+- Estilos: Tailwind CSS + Lucide React.
+- Almacenamiento: Google AI File API (File Search indexado).
+
+# Rules of Conduct
+1. **Model Specifics:** Configura siempre el modelo como `gemini-2.5-flash-lite`.
+2. **Double-Zone UI:** - Zona Superior: "Repositorio de Éxito (Corpus)" - Carga múltiple persistente.
+   - Zona Inferior: "Analizador de Propuesta" - Carga única + Chat contextual.
+3. **Prompt Engineering:** Las respuestas de análisis deben solicitarse en formato JSON para alimentar el Dashboard de la UI.
+4. **State Management:** Al cargar un nuevo archivo en la zona de análisis, limpia el `history` del chat y el `fileId` anterior.
+5. **Language:** UI y Feedback en Español (Colombia). Código y logs en Inglés.
+6. **Actualización Constante:** Utiliza siempre el MCP `context7` para consultar la documentación oficial y ejemplos de cualquier librería o framework (Next.js, Tailwind, Google AI SDK, etc.) antes de realizar cambios, para asegurar que el código use las versiones más recientes.
+7. **Contexto de Proyecto:** La carpeta `docs/` contiene la arquitectura, reglas de negocio y especificaciones técnicas que deben regir toda la implementación. Consúltalos antes de cada paso.
+8. **Target Directory:** Toda la implementación de código debe realizarse exclusivamente dentro de la carpeta `solucion1/`.
+
+# Prohibiciones
+- No usar bases de datos vectoriales externas.
+- No usar bibliotecas de OCR pesadas (Gemini 2.5 ya procesa PDF/Imágenes nativamente).

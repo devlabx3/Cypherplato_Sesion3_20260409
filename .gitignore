@@ -46,7 +46,7 @@
 
 # --- Claude Code / Cursor (configuración local del desarrollador) ---
 **/.claude/settings.local.json
-**/.cursorrules
+
 
 # --- Vercel ---
 **/.vercel/
