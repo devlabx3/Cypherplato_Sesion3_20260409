@@ -1,5 +1,25 @@
 "use server";
 
+/**
+ * googleAi.ts — Conexión entre la app y los servicios de Google AI
+ *
+ * Este archivo contiene todas las funciones que hablan con la API de Google.
+ * Al tener la directiva "use server" al inicio, Next.js garantiza que este
+ * código SOLO corre en el servidor — nunca en el navegador del usuario.
+ * Eso es importante porque aquí usamos la API key, que debe mantenerse secreta.
+ *
+ * ¿Qué es una Server Action?
+ * Es una función que el cliente puede llamar como si fuera local, pero que
+ * en realidad se ejecuta en el servidor. Next.js maneja la comunicación
+ * automáticamente — tú solo importas y llamas la función desde un componente.
+ *
+ * Patrón que implementa: Zero-Infra RAG
+ * En vez de guardar documentos en una base de datos vectorial, subimos los PDFs
+ * a Google AI Studio y los referenciamos por su URI (una dirección única en la nube).
+ * Gemini puede leer esos archivos directamente cuando construimos el prompt.
+ * Esto elimina la necesidad de instalar y mantener servicios extra como ChromaDB.
+ */
+
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { GoogleAIFileManager } from "@google/generative-ai/server";
 import { tmpdir } from "os";
@@ -7,19 +27,37 @@ import { join } from "path";
 import { writeFile, unlink } from "fs/promises";
 import { v4 as uuidv4 } from "uuid";
 
+// La API key viene del archivo .env.local — nunca se escribe directamente en el código.
+// El "!" al final le dice a TypeScript: "confía en que este valor existe".
 const apiKey = process.env.GOOGLE_API_KEY!;
+
+// fileManager maneja los archivos subidos a Google AI Studio.
+// Piénsalo como un gestor de archivos en la nube vinculado a tu cuenta de Google AI.
 const fileManager = new GoogleAIFileManager(apiKey);
+
+// genAI es el punto de entrada para hablar con los modelos de Gemini.
+// Con él creamos instancias del modelo para generar texto.
 const genAI = new GoogleGenerativeAI(apiKey);
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Verifica la conectividad básica con la API de Gemini realizando una llamada de tipo "ping".
- * Sirve como un rápido control de salud (health check) al cargar la aplicación.
- * @returns Object indicating success or failure of the connection.
+ * checkGeminiConnection — Verifica que la API key funciona
+ *
+ * Envía un mensaje mínimo ("ping") a Gemini para confirmar que la conexión
+ * está activa. Si la key es inválida o no hay acceso a internet, retorna error.
+ *
+ * El frontend llama a esta función al cargar la página para mostrar
+ * un indicador de estado (verde = conectado, rojo = error).
+ *
+ * Concepto clave: try/catch
+ * Si algo falla dentro del try, el código salta al catch y devolvemos
+ * { success: false } en vez de que la app explote con un error no manejado.
  */
 export async function checkGeminiConnection() {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
-    // Llamada casi instantánea para asegurarnos de que la apiKey y la red funcionan
+    // Llamada mínima — solo queremos saber si la conexión funciona
     await model.generateContent("ping");
     return { success: true };
   } catch (error: any) {
@@ -28,13 +66,28 @@ export async function checkGeminiConnection() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Sube un archivo PDF local temporalmente a la nube usando `GoogleAIFileManager`.
- * Este archivo luego puede ser referenciado mediante su URI en prompts de Gemini.
- * Se asegura de guardar el archivo localmente primero (requerido por el SDK) y borrarlo tras la subida exitosa.
- * @param formData FormData containing the 'file' to upload.
- * @returns Object with the uploaded file metadata (fileId, displayName, uri) or an error.
+ * uploadToGoogleAI — Sube un PDF a la nube de Google AI Studio
+ *
+ * ¿Por qué hay un paso con /tmp?
+ * El SDK de Google requiere leer el archivo desde el disco del servidor.
+ * Como el PDF llega como un objeto File (datos en memoria), primero lo
+ * escribimos en la carpeta temporal del sistema (/tmp), lo subimos,
+ * y luego borramos ese temporal — ya no lo necesitamos.
+ *
+ * ¿Qué es un URI?
+ * Es la "dirección" única del archivo en la nube de Google AI.
+ * Se parece a: "https://generativelanguage.googleapis.com/v1beta/files/abc123"
+ * Ese URI es lo que usamos más adelante para referenciar el archivo en los prompts.
+ *
+ * Lo que retorna:
+ * - fileId: nombre interno del archivo en la API (ej. "files/abc123")
+ * - displayName: el nombre original del PDF que subió el usuario
+ * - uri: la dirección del archivo (se pasa a analyzeDraft y chatWithModel)
+ *
+ * @param formData - Datos del formulario HTML que contienen el archivo bajo la clave "file"
  */
 export async function uploadToGoogleAI(formData: FormData) {
   try {
@@ -43,17 +96,23 @@ export async function uploadToGoogleAI(formData: FormData) {
       throw new Error("No file provided");
     }
 
+    // arrayBuffer() convierte el File en bytes crudos que podemos guardar en disco
     const buffer = Buffer.from(await file.arrayBuffer());
+
+    // uuidv4() genera un identificador único (ej. "f47ac10b-58cc-...") para evitar
+    // que dos archivos con el mismo nombre colisionen en /tmp
     const tempPath = join(tmpdir(), `${uuidv4()}-${file.name}`);
-    
+
+    // Escribir el archivo en el disco del servidor temporalmente
     await writeFile(tempPath, buffer);
 
+    // Subir a Google AI Studio con el tipo MIME del archivo (ej. "application/pdf")
     const uploadResponse = await fileManager.uploadFile(tempPath, {
       mimeType: file.type,
       displayName: file.name,
     });
 
-    // Clean up local temp file
+    // El archivo ya está en la nube — borramos el temporal del servidor
     await unlink(tempPath);
 
     return {
@@ -68,14 +127,35 @@ export async function uploadToGoogleAI(formData: FormData) {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Compara y evalúa un borrador de propuesta contra un conjunto de documentos base (corpus).
- * Implementa el patrón Zero-Infra RAG: enviando las URIs nativas de Google AI sin depender de bases de datos vectoriales.
- * Retorna siempre un JSON con las calificaciones de los 4 pilares establecidos.
- * @param draftFileUri URI del documento borrador subido.
- * @param corpusFileUris Array de URIs correspondientes a los documentos de éxito (Corpus).
- * @param draftName Nombre original del archivo borrador.
- * @returns Un objeto JSON parseado con la estructura de calificación definida en el prompt.
+ * analyzeDraft — Evalúa un borrador comparándolo contra el corpus
+ *
+ * Este es el corazón del sistema. Implementa el patrón Zero-Infra RAG:
+ * en lugar de buscar fragmentos en una base de datos, construimos un prompt
+ * que incluye referencias directas a todos los archivos. Gemini los lee todos
+ * y genera la evaluación basándose en ese contexto.
+ *
+ * ¿Qué es un prompt multi-parte?
+ * Gemini acepta mensajes que combinan texto e instrucciones con referencias
+ * a archivos. El array "parts" es ese mensaje: primero va el prompt de texto
+ * con las instrucciones, luego los archivos del corpus, y al final el borrador.
+ *
+ * ¿Por qué pedimos JSON como respuesta?
+ * El parámetro responseMimeType: "application/json" le indica a Gemini
+ * que su respuesta debe ser JSON válido. Esto nos permite hacer JSON.parse()
+ * directamente sin tener que extraer datos de texto libre.
+ *
+ * Los 4 pilares que evalúa:
+ *   1. Desglose de Rubros — ¿el presupuesto está detallado?
+ *   2. Impacto Territorial — ¿menciona comunidades concretas de Medellín?
+ *   3. Cronograma — ¿tiene un plan de trabajo claro?
+ *   4. Calidad Técnica — ¿es legible y profesional?
+ *
+ * @param draftFileUri   - URI del borrador subido a Google AI
+ * @param corpusFileUris - Array de URIs de los documentos del corpus
+ * @param draftName      - Nombre del archivo borrador (se menciona en el prompt)
  */
 export async function analyzeDraft(draftFileUri: string, corpusFileUris: string[], draftName: string) {
   try {
@@ -115,11 +195,14 @@ Tu respuesta DEBE ser estrictamente un JSON válido con la siguiente estructura 
 }
 `;
 
+    // "parts" es el mensaje completo que le enviamos a Gemini.
+    // Puede mezclar texto plano y referencias a archivos en la nube.
     const parts: any[] = [
       { text: prompt },
     ];
 
-    // Add Corpus files
+    // Agregar cada documento del corpus — Gemini los usará como referencia
+    // de "cómo se ve una propuesta aprobada"
     for (const uri of corpusFileUris) {
       parts.push({
         fileData: {
@@ -129,7 +212,7 @@ Tu respuesta DEBE ser estrictamente un JSON válido con la siguiente estructura 
       });
     }
 
-    // Add Draft file
+    // Agregar el borrador al final — es el documento que se va a evaluar
     parts.push({
       fileData: {
         mimeType: "application/pdf",
@@ -140,11 +223,13 @@ Tu respuesta DEBE ser estrictamente un JSON válido con la siguiente estructura 
     const result = await model.generateContent({
       contents: [{ role: "user", parts }],
       generationConfig: {
+        // Fuerza a Gemini a responder solo con JSON válido — sin texto extra
         responseMimeType: "application/json",
       },
     });
 
     const responseText = result.response.text();
+    // JSON.parse convierte el string JSON en un objeto JavaScript
     return { success: true, data: JSON.parse(responseText) };
   } catch (error: any) {
     console.error("Error analyzing draft:", error);
@@ -152,14 +237,27 @@ Tu respuesta DEBE ser estrictamente un JSON válido con la siguiente estructura 
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Genera una interacción conversacional (chat) sobre el borrador y el corpus.
- * Mantiene la memoria pasando el historial en el prompt e inyecta los archivos relevantes como contexto.
- * @param question La nueva pregunta lanzada por el usuario.
- * @param chatHistory El array de mensajes previos para la continuidad de la conversación.
- * @param draftFileUri El URI (referencia) al borrador actual.
- * @param corpusFileUris Las URIs de la base de conocimiento cargada en la sesión.
- * @returns Una respuesta textual natural del modelo respondiendo la duda específica.
+ * chatWithModel — Responde preguntas del usuario sobre el borrador
+ *
+ * Una vez analizado el borrador, el usuario puede hacer preguntas libres.
+ * Esta función construye el prompt incluyendo:
+ *   - El historial de conversación (para que Gemini recuerde lo hablado)
+ *   - Los archivos del corpus y el borrador como contexto
+ *   - La nueva pregunta del usuario
+ *
+ * ¿Por qué pasamos el historial manualmente?
+ * Las Server Actions de Next.js no tienen estado entre llamadas — cada
+ * ejecución es independiente. Para simular una conversación continua,
+ * el frontend guarda el historial en su estado (useState) y lo envía
+ * completo en cada petición. Gemini recibe toda la conversación de una vez.
+ *
+ * @param question       - La nueva pregunta del usuario
+ * @param chatHistory    - Mensajes anteriores: [{role: "user"|"assistant", content: "..."}]
+ * @param draftFileUri   - URI del borrador en Google AI Studio
+ * @param corpusFileUris - URIs de los documentos del corpus seleccionados
  */
 export async function chatWithModel(
   question: string,
@@ -172,8 +270,9 @@ export async function chatWithModel(
       model: "gemini-2.5-flash-lite",
     });
 
-    // Formatting history for prompt
-    const formattedHistory = chatHistory.length > 0 
+    // Convertir el array de mensajes a texto plano para incluirlo en el prompt.
+    // Si no hay historial, esta variable queda vacía y no afecta el prompt.
+    const formattedHistory = chatHistory.length > 0
       ? "Historial de la conversación:\n" + chatHistory.map(msg => `${msg.role === 'user' ? 'Usuario' : 'Asistente'}: ${msg.content}`).join("\n") + "\n\n"
       : "";
 
@@ -195,7 +294,6 @@ Instrucciones:
 
     const parts: any[] = [{ text: prompt }];
 
-    // Add Corpus files
     for (const uri of corpusFileUris) {
       parts.push({
         fileData: {
@@ -205,7 +303,6 @@ Instrucciones:
       });
     }
 
-    // Add Draft file
     parts.push({
       fileData: {
         mimeType: "application/pdf",
@@ -225,23 +322,32 @@ Instrucciones:
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Funcionalidad utilitaria para purgar permanentemente la base documental remota vinculada a la API Key.
- * Esto asegura que ya no haya rastros en Google AI Studio de los archivos cargados, liberando cuota.
- * @returns Resultado booleano de éxito e información numérica de cuántos archivos fueron borrados.
+ * deleteAllFilesFromGoogleAI — Elimina todos los archivos de la cuenta
+ *
+ * Google AI Studio tiene una cuota de almacenamiento por cuenta. Esta función
+ * borra todos los archivos subidos para liberar espacio y empezar de cero.
+ *
+ * ¿Por qué iterar uno a uno?
+ * La API de Google no tiene un endpoint de "borrar todo". Solo permite borrar
+ * archivos individualmente, así que recorremos la lista y borramos cada uno.
+ *
+ * Retorna cuántos archivos fueron eliminados, útil para mostrar feedback al usuario.
  */
 export async function deleteAllFilesFromGoogleAI() {
   try {
     const listResult = await fileManager.listFiles();
     let deletedCount = 0;
-    
+
     if (listResult.files && listResult.files.length > 0) {
       for (const file of listResult.files) {
         await fileManager.deleteFile(file.name);
         deletedCount++;
       }
     }
-    
+
     return { success: true, count: deletedCount };
   } catch (error: any) {
     console.error("Error deleting files:", error);
@@ -249,11 +355,20 @@ export async function deleteAllFilesFromGoogleAI() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Recupera la lista completa de archivos alojados actualmente en Google AI Studio bajo esta cuenta.
- * Resulta clave para la "rehidratación" visual de la interfaz si el usuario recarga la página, 
- * evitando subidas duplicadas del mismo RAG.
- * @returns Array de objetos con URI, nombre clave y nombre para mostrar de cada documento.
+ * listGoogleAIFiles — Lista todos los archivos activos en Google AI Studio
+ *
+ * Cuando el usuario recarga la página, la interfaz necesita saber qué
+ * documentos del corpus ya están subidos para mostrarlos sin pedirle
+ * que los suba de nuevo. Esta función consulta la API y retorna el listado.
+ *
+ * Concepto clave — URI vs nombre:
+ * - "name" es el identificador interno de la API (ej. "files/abc123")
+ *   y se usa para operaciones como borrar el archivo.
+ * - "uri" es la dirección completa del archivo y se usa en los prompts
+ *   de analyzeDraft y chatWithModel para referenciar el contenido.
  */
 export async function listGoogleAIFiles() {
   try {

@@ -1,0 +1,32 @@
+# Reglas de Cursor - Solución 3 (ChromaDB + Gemini Semantic Chunking)
+
+> **IMPORTANTE:** Antes de modificar cualquier archivo de este proyecto, leer los documentos en la carpeta `docs/` para entender la arquitectura vigente:
+> - `docs/architecture-spec.md` — flujo completo del sistema RAG
+> - `docs/tech-spec.md` — decisiones técnicas y configuración
+> - `docs/business-rules.md` — pilares de evaluación Platohedro
+
+1. **Tecnologías Principales**:
+   - Framework: Next.js 16+ (App Router).
+   - Estilos: Tailwind CSS.
+   - LLM: `gemini-2.5-flash-lite` (extracción/chunking de PDF y generación de texto) y `gemini-embedding-001` (embeddings), ambos vía SDK `@google/generative-ai`.
+   - Base de Datos Vectorial: `chromadb` v3 corriendo en Docker (`localhost:8000`) — solo para el **corpus**.
+   - Procesamiento de PDFs: el PDF se convierte a base64 y se envía a `gemini-2.5-flash-lite` como `inlineData`. Gemini analiza el documento y devuelve un JSON `{ sections: [{title, content}] }` donde cada sección es un bloque semántico completo (párrafo, tabla, lista). **No hay splitter externo ni microservicio Docker adicional.**
+   - Chunking: lo hace Gemini directamente. Nunca parte una tabla, lista o párrafo a mitad. No usar `MarkdownTextSplitter`, `RecursiveCharacterTextSplitter` ni ningún splitter de LangChain.
+
+2. **Arquitectura RAG Híbrida**:
+   - **Corpus (ChromaDB):** Los PDFs de referencia aprobados se procesan, embeden y persisten en ChromaDB (`colección: "rag_corpus"`). Sobreviven reinicios.
+   - **Borrador/Licitación (In-Memory):** El PDF a evaluar se procesa y sus chunks+embeddings se guardan en un `Map` en memoria del servidor (`draftStore`). **Nunca se escribe en ChromaDB.** Se pierde al reiniciar el proceso.
+   - El embedding se genera llamando directamente a `genAI.getGenerativeModel({ model: "gemini-embedding-001" }).embedContent(text)`, sin wrappers de LangChain (el wrapper `@langchain/google-genai` retorna arrays vacíos — bug conocido).
+   - La búsqueda semántica sobre el borrador usa cosine similarity implementada localmente (`cosineSimilarity`).
+   - En análisis y chat, el contexto se construye combinando fragmentos del borrador (memoria) y del corpus (ChromaDB).
+
+3. **Restricciones Técnicas**:
+   - Todo el proceso vectorial y de IA debe ocurrir en Server Actions (`"use server"`), en `src/actions/localAi.ts`.
+   - La extracción y chunking de PDFs usa `extractChunksWithGemini(file)` — convierte el PDF a base64, lo envía a Gemini como `inlineData` y parsea el JSON de secciones. Retorna `Promise<string[]>`.
+   - No usar `@langchain/google-genai` para embeddings — usar el SDK directo `@google/generative-ai`.
+   - No usar splitters de LangChain (`MarkdownTextSplitter`, `RecursiveCharacterTextSplitter`, etc.) — el chunking lo hace Gemini de forma nativa.
+   - No usar `require()` dinámico — usar `import` estático.
+   - Mantener consistencia visual exacta con `solucion1`.
+   - Manejar errores devolviendo siempre: `{ success: boolean, data?: any, error?: string }`.
+   - Variable de entorno requerida: solo `GOOGLE_API_KEY`. No existe `MARKER_SERVICE_URL`.
+   - Límite de tamaño de PDF: ~20MB (restricción de `inlineData` en el SDK `@google/generative-ai` v0.24).

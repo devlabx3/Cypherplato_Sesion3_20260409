@@ -1,19 +1,28 @@
 "use server";
 
 /**
- * localAi.ts — Capa de acceso a IA y base vectorial
+ * localAi.ts — Motor de IA y base vectorial local
  *
- * Este archivo centraliza toda la lógica de backend relacionada con:
- *   1. Procesamiento de PDFs (extracción de texto y fragmentación)
- *   2. Generación de embeddings (vectores semánticos) via Google Gemini
- *   3. Almacenamiento y búsqueda en ChromaDB (base de datos vectorial)
- *   4. Análisis automático de borradores usando RAG (Retrieval-Augmented Generation)
- *   5. Chat conversacional con contexto del borrador y del corpus
+ * Este archivo centraliza toda la lógica de backend:
+ *   1. Extraer texto de PDFs y dividirlo en fragmentos (chunks)
+ *   2. Convertir esos fragmentos en vectores numéricos (embeddings)
+ *   3. Guardar y buscar en ChromaDB (base de datos vectorial local)
+ *   4. Evaluar borradores usando RAG con Gemini
+ *   5. Responder preguntas del usuario con contexto recuperado
  *
- * Flujo general del sistema RAG:
- *   PDF → Texto → Chunks → Embeddings → ChromaDB
+ * ¿Qué es RAG? (Retrieval-Augmented Generation)
+ * Es un patrón donde antes de pedirle a un modelo de lenguaje que responda,
+ * primero buscamos información relevante en una base de datos y se la damos
+ * como contexto. Así el modelo responde con datos reales, no inventados.
+ *
+ * Flujo visual del sistema:
+ *
+ *   PDF → Texto → Chunks → Embeddings → ChromaDB (corpus)
  *                                           ↓
- *   Pregunta → Embedding → Búsqueda semántica → Contexto → Gemini → Respuesta
+ *   Pregunta → Embedding → Búsqueda → Chunks relevantes → Gemini → Respuesta
+ *
+ * La directiva "use server" hace que este código solo corra en el servidor.
+ * La API key y los datos del corpus nunca llegan al navegador del usuario.
  */
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -21,54 +30,65 @@ import { ChromaClient } from "chromadb";
 import { v4 as uuidv4 } from "uuid";
 import pdfParse from "pdf-parse";
 
-// RecursiveCharacterTextSplitter divide texto largo en trozos más pequeños
-// respetando límites naturales (párrafos, oraciones, palabras) de forma recursiva.
+// RecursiveCharacterTextSplitter divide texto largo en fragmentos más pequeños.
+// "Recursive" significa que intenta respetar límites naturales: primero párrafos,
+// luego oraciones, luego palabras — solo corta a la mitad si no queda opción.
 import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
 
 // ─── Inicialización de clientes ───────────────────────────────────────────────
 
-// La API key de Google se lee desde variables de entorno (no se hardcodea por seguridad)
+// La API key se lee de variables de entorno — nunca se escribe en el código
 const apiKey = process.env.GOOGLE_API_KEY!;
 
-// Cliente principal de Google Generative AI
+// genAI es el cliente principal para hablar con los modelos de Google
 const genAI = new GoogleGenerativeAI(apiKey);
 
-// Cliente de ChromaDB: base de datos vectorial que corre localmente en el puerto 8000.
-// Almacena los embeddings del corpus (propuestas aprobadas) para búsqueda semántica.
+// ChromaDB es la base de datos vectorial que corre en tu máquina via Docker.
+// El puerto 8000 es el que configuramos en docker-compose.yml.
 const chromaClient = new ChromaClient({ path: "http://localhost:8000" });
 
-// Modelo especializado en convertir texto a vectores numéricos (embeddings).
-// "gemini-embedding-001" transforma frases/párrafos en vectores de alta dimensión
-// que capturan el significado semántico del texto.
+// embeddingModel convierte texto a vectores numéricos.
+// ¿Para qué sirven esos vectores? Para buscar por significado, no por palabras exactas.
+// Ejemplo: "auto" y "coche" tienen vectores muy parecidos aunque las palabras sean distintas.
 const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
 
-// ─── Store en memoria para borradores ─────────────────────────────────────────
+// ─── Almacenamiento en memoria para borradores ────────────────────────────────
 //
-// Los borradores (propuestas no aprobadas aún) se guardan solo en memoria RAM,
-// NO en ChromaDB. Esto los mantiene separados del corpus de referencia y evita
-// que "contaminen" la base de buenas prácticas.
-// La desventaja: se pierden si el servidor se reinicia.
+// Los borradores (propuestas aún no aprobadas) se guardan en RAM, NO en ChromaDB.
+// Razón: queremos mantenerlos separados del corpus de referencia para que no
+// "contaminen" las búsquedas. Si el servidor se reinicia, se pierden — es intencional.
+//
+// ¿Qué es un Map en JavaScript?
+// Es como un diccionario: tiene claves y valores. Aquí la clave es un UUID
+// generado al subir el borrador, y el valor son sus datos (texto + vectores).
 
 interface DraftChunk {
-  text: string;       // Fragmento de texto del borrador
-  embedding: number[]; // Vector semántico correspondiente a ese fragmento
+  text: string;        // El fragmento de texto original
+  embedding: number[]; // El vector numérico que representa ese fragmento
 }
 interface DraftEntry {
-  displayName: string; // Nombre original del archivo PDF
-  chunks: DraftChunk[]; // Lista de fragmentos con sus embeddings
+  displayName: string;  // Nombre original del PDF
+  chunks: DraftChunk[]; // Lista de todos los fragmentos del documento
 }
 
-// Map<draftId, DraftEntry>: clave = UUID generado al subir, valor = datos del borrador
+// Map<draftId, DraftEntry>
 const draftStore = new Map<string, DraftEntry>();
 
-// ─── Utilidades internas ──────────────────────────────────────────────────────
+// ─── Funciones internas (no exportadas) ──────────────────────────────────────
 
 /**
- * Convierte un array de textos en sus representaciones vectoriales (embeddings).
- * Se procesan en paralelo con Promise.all para mayor velocidad.
+ * embedTexts — Convierte un array de textos en vectores numéricos
+ *
+ * Un embedding es una lista de ~3072 números que captura el "significado" del texto.
+ * Textos con contenido similar producen vectores parecidos, lo que permite
+ * buscar por semántica ("encuentra fragmentos sobre presupuesto").
+ *
+ * Promise.all ejecuta todas las peticiones en paralelo — en lugar de
+ * esperar que termine una para empezar la siguiente, las lanza todas a la vez.
+ * Esto es mucho más rápido cuando hay muchos chunks.
  *
  * @param texts - Array de strings a vectorizar
- * @returns Array de vectores numéricos, uno por cada texto de entrada
+ * @returns Array de vectores, uno por cada texto de entrada
  */
 async function embedTexts(texts: string[]): Promise<number[][]> {
   const results = await Promise.all(
@@ -78,11 +98,18 @@ async function embedTexts(texts: string[]): Promise<number[][]> {
 }
 
 /**
- * Calcula la similitud coseno entre dos vectores.
- * Retorna un valor entre -1 y 1, donde 1 = idénticos, 0 = sin relación.
- * Es la métrica estándar para comparar embeddings de texto.
+ * cosineSimilarity — Mide qué tan parecidos son dos vectores
  *
- * Fórmula: (A · B) / (|A| * |B|)
+ * Retorna un número entre -1 y 1:
+ *   1  = vectores idénticos (textos con el mismo significado)
+ *   0  = vectores perpendiculares (textos sin relación)
+ *  -1  = vectores opuestos (textos con significado contrario)
+ *
+ * Esta es la métrica estándar para comparar embeddings de texto.
+ * La fórmula calcula el ángulo entre dos vectores en un espacio de 3072 dimensiones.
+ *
+ * Fórmula: similitud = (A · B) / (|A| × |B|)
+ * Donde "·" es el producto punto y "|x|" es la magnitud del vector.
  */
 function cosineSimilarity(a: number[], b: number[]): number {
   let dot = 0, normA = 0, normB = 0;
@@ -95,35 +122,46 @@ function cosineSimilarity(a: number[], b: number[]): number {
 }
 
 /**
- * Busca los fragmentos más relevantes de un borrador (en memoria) dado un query.
- * Implementa la misma lógica de búsqueda semántica que ChromaDB, pero en memoria.
+ * searchDraftChunks — Busca los fragmentos más relevantes del borrador
+ *
+ * Implementa la búsqueda semántica en memoria (lo que ChromaDB hace en disco).
+ * Para cada fragmento del borrador, calcula qué tan similar es al query,
+ * los ordena de mayor a menor similitud y retorna los topK mejores.
+ *
+ * ¿Por qué "topK" y no todos?
+ * Los modelos tienen un límite de tokens. Mandar demasiado contexto es costoso
+ * y puede confundir al modelo. Con los 5 fragmentos más relevantes es suficiente.
  *
  * @param draftId        - ID del borrador en draftStore
- * @param queryEmbedding - Vector de la pregunta/query del usuario
- * @param topK           - Cuántos fragmentos devolver (los más similares)
- * @returns Array de strings con los fragmentos más relevantes
+ * @param queryEmbedding - Vector de la pregunta del usuario
+ * @param topK           - Cuántos fragmentos devolver
  */
 function searchDraftChunks(draftId: string, queryEmbedding: number[], topK: number): string[] {
   const entry = draftStore.get(draftId);
   if (!entry) return [];
   return entry.chunks
     .map(c => ({ text: c.text, score: cosineSimilarity(queryEmbedding, c.embedding) }))
-    .sort((a, b) => b.score - a.score) // Mayor similitud primero
+    .sort((a, b) => b.score - a.score) // De mayor a menor similitud
     .slice(0, topK)
     .map(c => c.text);
 }
 
-// ─── Acciones exportadas (Server Actions de Next.js) ─────────────────────────
+// ─── Server Actions exportadas ────────────────────────────────────────────────
 
 /**
- * Verifica que tanto Gemini como ChromaDB estén accesibles.
- * Útil para mostrar el estado de conexión en el frontend.
+ * checkGeminiConnection — Verifica que Gemini y ChromaDB estén disponibles
+ *
+ * Hace un "ping" a Gemini y un heartbeat a ChromaDB para confirmar que
+ * ambos servicios responden. El frontend muestra un indicador de estado basado
+ * en el resultado de esta función al cargar la página.
+ *
+ * heartbeat() es un endpoint de ChromaDB que simplemente confirma que el
+ * servidor está vivo — no hace ninguna operación con datos.
  */
 export async function checkGeminiConnection() {
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
     await model.generateContent("ping");
-    // También verificamos si ChromaDB está disponible en el puerto local
     await chromaClient.heartbeat();
     return { success: true };
   } catch (error: any) {
@@ -133,17 +171,25 @@ export async function checkGeminiConnection() {
 }
 
 /**
- * Procesa un PDF del corpus (propuestas aprobadas) y lo guarda en ChromaDB.
+ * addDocumentToVectorStore — Procesa un PDF del corpus y lo guarda en ChromaDB
  *
- * Pasos:
- *   1. Extrae el texto del PDF con pdf-parse
- *   2. Fragmenta el texto en chunks de ~1000 chars con solapamiento de 200
- *      (el solapamiento evita perder contexto en los bordes de cada chunk)
- *   3. Genera embeddings para cada chunk via Gemini
- *   4. Almacena todo en la colección "rag_corpus" de ChromaDB
+ * Este es el proceso de "ingesta" del RAG — transforma un documento legible
+ * por humanos en vectores que la máquina puede buscar eficientemente.
  *
- * Todos los chunks de un mismo archivo comparten el mismo `fileId` en sus
- * metadatos, lo que permite filtrar por archivo en búsquedas posteriores.
+ * Paso a paso:
+ *   1. pdf-parse extrae el texto plano del PDF (quita imágenes, formato, etc.)
+ *   2. RecursiveCharacterTextSplitter divide el texto en chunks de ~1000 chars.
+ *      El solapamiento de 200 chars evita perder contexto en los bordes.
+ *   3. embedTexts convierte cada chunk en un vector de 3072 números via Gemini.
+ *   4. ChromaDB guarda los vectores junto con el texto original y metadatos.
+ *
+ * ¿Por qué fragmentar en chunks y no guardar el documento completo?
+ * Porque la búsqueda semántica es más precisa con fragmentos pequeños.
+ * Un vector de un documento entero mezcla demasiados temas; un vector de
+ * un párrafo captura una idea específica.
+ *
+ * Todos los chunks de un archivo comparten el mismo fileId en sus metadatos.
+ * Esto permite recuperar o filtrar todos los chunks de un documento específico.
  */
 export async function addDocumentToVectorStore(formData: FormData) {
   try {
@@ -153,48 +199,48 @@ export async function addDocumentToVectorStore(formData: FormData) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    // 1. Extraer texto del PDF
+    // 1. Extraer texto del PDF — el resultado es un string con todo el contenido
     const pdfData = await pdfParse(buffer);
     const text = pdfData.text;
 
-    // 2. Fragmentar texto (Chunking) con LangChain
+    // 2. Fragmentar (chunking)
     //    chunkSize: máximo de caracteres por fragmento
-    //    chunkOverlap: caracteres compartidos entre chunks consecutivos (preserva contexto)
+    //    chunkOverlap: cuántos caracteres se repiten entre chunks consecutivos
     const splitter = new RecursiveCharacterTextSplitter({
       chunkSize: 1000,
       chunkOverlap: 200,
     });
     const chunks = await splitter.createDocuments([text]);
 
-    // 3. Generar Embeddings usando el modelo de Google
+    // 3. Generar embeddings — un vector por cada chunk
     const texts = chunks.map(c => c.pageContent);
     const vectors = await embedTexts(texts);
 
-    // 4. Guardar en ChromaDB (Colección única)
-    //    Un fileId único identifica todos los chunks de este archivo
-    const fileId = uuidv4();
+    // 4. Guardar en ChromaDB
+    //    getOrCreateCollection crea la colección si no existe, o la reutiliza
+    const fileId = uuidv4(); // ID único para este archivo
     const collection = await chromaClient.getOrCreateCollection({
       name: "rag_corpus"
     });
 
-    // Cada chunk recibe un ID único: "{fileId}_chunk_{índice}"
+    // Cada chunk necesita un ID único dentro de ChromaDB
     const ids = chunks.map((_, i) => `${fileId}_chunk_${i}`);
-    // Los metadatos permiten filtrar por archivo en búsquedas futuras
+
+    // Los metadatos nos permiten filtrar por archivo cuando hagamos búsquedas
     const metadatas = chunks.map(() => ({ fileId, displayName: file.name }));
 
     await collection.add({
       ids,
       embeddings: vectors,
       metadatas,
-      documents: texts,
+      documents: texts, // Guardamos también el texto original para poder mostrarlo
     });
 
-    // Retornamos fileId como "uri" para compatibilidad con el frontend
     return {
       success: true,
       fileId: fileId,
       displayName: file.name,
-      uri: fileId,
+      uri: fileId, // El frontend usa "uri" como identificador — aquí coincide con fileId
     };
   } catch (error: any) {
     console.error("Error uploading to Chroma:", error);
@@ -203,12 +249,14 @@ export async function addDocumentToVectorStore(formData: FormData) {
 }
 
 /**
- * Procesa un PDF borrador y lo guarda en memoria (NO en ChromaDB).
+ * uploadDraft — Procesa un PDF borrador y lo guarda en memoria RAM
  *
- * Funciona igual que addDocumentToVectorStore pero almacena en draftStore (RAM).
- * Esto mantiene los borradores separados del corpus de referencia.
+ * Hace exactamente lo mismo que addDocumentToVectorStore (extraer, fragmentar,
+ * vectorizar), pero guarda el resultado en draftStore (Map en RAM) en vez
+ * de en ChromaDB. Esto mantiene el borrador separado del corpus.
  *
- * Retorna un draftId que el frontend usa como identificador temporal.
+ * Retorna un draftId (UUID) que el frontend guarda y envía en cada
+ * llamada a analyzeDraft y chatWithModel para identificar el borrador.
  */
 export async function uploadDraft(formData: FormData) {
   try {
@@ -226,7 +274,6 @@ export async function uploadDraft(formData: FormData) {
     const texts = docs.map(d => d.pageContent);
     const vectors = await embedTexts(texts);
 
-    // Guardar en memoria con un UUID como clave
     const draftId = uuidv4();
     draftStore.set(draftId, {
       displayName: file.name,
@@ -241,13 +288,15 @@ export async function uploadDraft(formData: FormData) {
 }
 
 /**
- * Lista todos los archivos del corpus almacenados en ChromaDB.
+ * listVectorStoreDocuments — Lista los archivos del corpus en ChromaDB
  *
- * ChromaDB almacena chunks individuales, no archivos completos. Por eso
- * necesitamos reconstruir la lista de archivos agrupando por fileId en metadatos.
+ * ChromaDB guarda chunks individuales, no archivos completos. Si subiste
+ * un PDF de 50 páginas, ChromaDB tiene decenas de chunks de ese archivo.
+ * Para mostrar al usuario "1 archivo subido", necesitamos agrupar los chunks
+ * por fileId y deduplicar — eso es lo que hace el Map interno.
  *
- * El frontend usa esta lista para que el usuario seleccione qué documentos
- * del corpus usar como referencia al analizar un borrador.
+ * El frontend usa esta lista para mostrar qué documentos del corpus están
+ * disponibles y dejar que el usuario seleccione cuáles usar en el análisis.
  */
 export async function listVectorStoreDocuments() {
   try {
@@ -256,8 +305,7 @@ export async function listVectorStoreDocuments() {
         include: ["metadatas" as any]
     });
 
-    // Agrupar por fileId para regenerar la lista de archivos
-    // (un archivo = muchos chunks → deduplicamos con un Map)
+    // Usamos un Map para deduplicar: si un fileId ya está, lo ignoramos
     const filesMap = new Map();
     if (results.metadatas) {
         results.metadatas.forEach((meta: any) => {
@@ -280,53 +328,64 @@ export async function listVectorStoreDocuments() {
 }
 
 /**
- * Elimina toda la colección "rag_corpus" de ChromaDB.
- * Esto borra TODOS los documentos del corpus de una vez.
+ * clearVectorStore — Borra toda la colección del corpus en ChromaDB
  *
- * Nota: los borradores en memoria (draftStore) no se ven afectados.
+ * deleteCollection elimina todos los chunks y vectores de "rag_corpus".
+ * Es una operación destructiva — no hay forma de recuperar los datos borrados.
+ *
+ * Los borradores en memoria (draftStore) no se ven afectados por esta función.
  */
 export async function clearVectorStore() {
   try {
     await chromaClient.deleteCollection({ name: "rag_corpus" });
     return { success: true, count: 1 };
   } catch (error: any) {
-    // Si no existe la colección no hay error que reportar
+    // Si la colección no existía, no es un error — simplemente no hay nada que borrar
     return { success: true, count: 0 };
   }
 }
 
 /**
- * Analiza un borrador comparándolo contra el corpus usando RAG + Gemini.
+ * analyzeDraft — Evalúa un borrador comparándolo contra el corpus (RAG completo)
  *
- * Flujo:
- *   1. Recupera el borrador completo desde draftStore (memoria)
- *   2. Genera un embedding del inicio del borrador para buscar contexto relevante
- *   3. Consulta ChromaDB para obtener los 15 chunks más similares del corpus
- *   4. Construye un prompt con el borrador + contexto del corpus
- *   5. Gemini evalúa 4 pilares y devuelve un JSON estructurado con puntuación
+ * Este es el paso central del sistema. Implementa el patrón RAG en su forma completa:
  *
- * @param draftFileUri    - ID del borrador en draftStore
- * @param corpusFileUris  - IDs de los archivos del corpus a usar como referencia
- * @param draftName       - Nombre del archivo borrador (para el prompt)
+ *   Paso 1 — Recuperar el borrador de la memoria usando su draftId
+ *   Paso 2 — Convertir el inicio del borrador en un vector (query embedding)
+ *   Paso 3 — Buscar en ChromaDB los 15 chunks del corpus más similares a ese vector
+ *   Paso 4 — Combinar el borrador completo + esos 15 chunks como contexto del prompt
+ *   Paso 5 — Gemini lee todo y genera la evaluación en formato JSON
+ *
+ * ¿Por qué buscar con los primeros 1000 chars del borrador?
+ * La introducción de un documento suele resumir su tema. Buscar con ese texto
+ * ayuda a recuperar los fragmentos del corpus más relevantes al tema del borrador.
+ *
+ * ¿Por qué el filtro WHERE en ChromaDB?
+ * Si el usuario seleccionó documentos específicos del corpus, solo queremos
+ * buscar dentro de esos documentos — no en todo el corpus.
+ * ChromaDB usa operadores como "$in" (está en la lista) para filtrar.
+ *
+ * @param draftFileUri    - ID del borrador en draftStore (el UUID generado en uploadDraft)
+ * @param corpusFileUris  - IDs de los archivos del corpus seleccionados por el usuario
+ * @param draftName       - Nombre del archivo para mencionarlo en el prompt
  */
 export async function analyzeDraft(draftFileUri: string, corpusFileUris: string[], draftName: string) {
   try {
     const collection = await chromaClient.getCollection({ name: "rag_corpus" });
 
-    // Obtener el borrador desde memoria y reconstruir el texto completo
+    // Recuperar el borrador de la memoria y reconstruir el texto completo
     const draftEntry = draftStore.get(draftFileUri);
     if (!draftEntry) throw new Error("Borrador no encontrado en memoria. Vuelve a subirlo.");
     const draftText = draftEntry.chunks.map(c => c.text).join("\n");
 
-    // Usar los primeros 1000 chars del borrador como query de búsqueda semántica
-    // para encontrar los fragmentos del corpus más relevantes al tema del borrador
+    // Usar el inicio del borrador como query para buscar contexto relevante en el corpus
     const draftQuery = draftText.substring(0, 1000);
     const queryEmbeddings = await embedTexts([draftQuery]);
 
-    // Construir el filtro WHERE para ChromaDB:
-    // - Si hay múltiples archivos de corpus → usar operador $in (array)
-    // - Si hay solo uno → filtro directo por fileId
-    // - Si no hay corpus → no aplicar filtro (undefined)
+    // Construir el filtro de ChromaDB según cuántos archivos de corpus hay:
+    //   - Varios archivos → operador $in: busca donde fileId esté en el array
+    //   - Un archivo     → comparación directa por igualdad
+    //   - Sin corpus     → undefined (sin filtro, busca en todo)
     const corpusWhere = corpusFileUris.length > 1
       ? { fileId: { "$in": corpusFileUris } }
       : (corpusFileUris.length === 1 ? { fileId: corpusFileUris[0] } : undefined);
@@ -334,7 +393,7 @@ export async function analyzeDraft(draftFileUri: string, corpusFileUris: string[
     let corpusContext = "";
 
     if (corpusWhere) {
-      // Recuperar los 15 chunks más relevantes del corpus (paso RAG)
+      // Búsqueda semántica en ChromaDB — retorna los 15 chunks más similares
       const searchResults = await collection.query({
         queryEmbeddings: queryEmbeddings,
         nResults: 15,
@@ -345,9 +404,8 @@ export async function analyzeDraft(draftFileUri: string, corpusFileUris: string[
       corpusContext = relevantCorpusChunks.join("\n\n");
     }
 
-    // Prompt de evaluación estructurado con 4 pilares de calificación.
-    // Se le pide a Gemini responder ÚNICAMENTE con JSON válido (sin markdown)
-    // para facilitar el parsing en el frontend.
+    // El prompt incluye el contexto del corpus y el borrador completo.
+    // Se le pide respuesta SOLO en JSON para facilitar el parsing en el frontend.
     const prompt = `
 Eres un evaluador de la organización Platohedro.
 Estás validando una nueva propuesta (borrador: ${draftName}).
@@ -390,7 +448,6 @@ Tu respuesta DEBE ser estrictamente un JSON válido con la siguiente estructura 
 `;
 
     const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" });
-    // responseMimeType: "application/json" le indica a Gemini que responda solo JSON
     const result = await model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
       generationConfig: { responseMimeType: "application/json" },
@@ -405,21 +462,29 @@ Tu respuesta DEBE ser estrictamente un JSON válido con la siguiente estructura 
 }
 
 /**
- * Responde preguntas del usuario sobre el borrador usando RAG conversacional.
+ * chatWithModel — Responde preguntas del usuario con contexto recuperado por RAG
  *
- * A diferencia de analyzeDraft (análisis automático), esta función es interactiva:
- * el usuario hace preguntas libres y recibe respuestas contextualizadas.
+ * Esta función es el chat interactivo post-análisis. A diferencia de analyzeDraft
+ * que evalúa el borrador de forma automática, aquí el usuario hace preguntas libres.
  *
- * Flujo RAG:
- *   1. Convierte la pregunta del usuario en un embedding
- *   2. Busca los 5 chunks más relevantes del borrador (en memoria)
- *   3. Busca los 5 chunks más relevantes del corpus (en ChromaDB)
- *   4. Combina ambos resultados como contexto para el prompt
- *   5. Incluye el historial de conversación para mantener coherencia
- *   6. Gemini responde basándose en el contexto recuperado
+ * El flujo RAG del chat:
+ *   1. Vectorizar la pregunta del usuario
+ *   2. Buscar los 5 chunks más relevantes del borrador (en memoria, con cosineSimilarity)
+ *   3. Buscar los 5 chunks más relevantes del corpus (en ChromaDB)
+ *   4. Combinar esos 10 chunks como contexto
+ *   5. Construir el prompt con el contexto + historial + pregunta
+ *   6. Gemini responde en texto libre (no JSON)
  *
- * @param question       - Pregunta actual del usuario
- * @param chatHistory    - Mensajes anteriores de la conversación
+ * ¿Por qué buscamos en ambos — borrador Y corpus?
+ * La pregunta puede referirse a "mi propuesta" (borrador) o a "las propuestas
+ * exitosas" (corpus). Al buscar en los dos, cubrimos ambos casos.
+ *
+ * ¿Por qué pasamos el historial completo?
+ * Las Server Actions no tienen estado entre llamadas. El frontend mantiene
+ * el historial en su estado (useState) y lo envía en cada petición.
+ *
+ * @param question       - La pregunta actual del usuario
+ * @param chatHistory    - Conversación previa: [{role, content}, ...]
  * @param draftFileUri   - ID del borrador en draftStore
  * @param corpusFileUris - IDs de los archivos del corpus seleccionados
  */
@@ -430,14 +495,14 @@ export async function chatWithModel(
   corpusFileUris: string[]
 ) {
   try {
-    // Vectorizar la pregunta para buscar contexto semánticamente relevante
+    // Paso 1: vectorizar la pregunta para buscar contexto relevante
     const queryEmbeddings = await embedTexts([question]);
     const queryEmbedding = queryEmbeddings[0];
 
-    // Buscar en el borrador (memoria): top 5 fragmentos más similares a la pregunta
+    // Paso 2: buscar en el borrador (memoria) — los 5 más similares
     const draftChunks = searchDraftChunks(draftFileUri, queryEmbedding, 5);
 
-    // Buscar en el corpus (ChromaDB): top 5 fragmentos más similares
+    // Paso 3: buscar en el corpus (ChromaDB) — los 5 más similares
     let corpusChunks: string[] = [];
     if (corpusFileUris.length > 0) {
       const collection = await chromaClient.getCollection({ name: "rag_corpus" });
@@ -453,10 +518,10 @@ export async function chatWithModel(
       corpusChunks = searchResults.documents?.[0] ?? [];
     }
 
-    // Unir contexto del borrador y del corpus en un solo bloque
+    // Paso 4: combinar contexto del borrador y del corpus
     const relevantContext = [...draftChunks, ...corpusChunks].join("\n\n");
 
-    // Formatear el historial de chat para incluirlo en el prompt
+    // Paso 5: formatear el historial de conversación para incluirlo en el prompt
     const formattedHistory = chatHistory.length > 0
       ? "Historial de la conversación:\n" + chatHistory.map(msg => `${msg.role === 'user' ? 'Usuario' : 'Asistente'}: ${msg.content}`).join("\n") + "\n\n"
       : "";

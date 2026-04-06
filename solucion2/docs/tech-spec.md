@@ -1,94 +1,76 @@
-# Especificación Técnica
+# Especificación Técnica — Solución 2
 
-## Dependencias clave
+## ¿Qué hace este archivo?
+
+Define las decisiones técnicas concretas: qué librerías se usan, cómo se configuran y por qué se eligieron así. Es una referencia para entender el "cómo" detrás del "qué" que describe la arquitectura.
+
+---
+
+## Dependencias principales
 
 ```bash
 npm install chromadb @google/generative-ai @langchain/textsplitters pdf-parse@1.1.1
 ```
 
-> Los embeddings se generan con el SDK directo `@google/generative-ai`. `@langchain/google-genai` **no forma parte del proyecto** — fue removido porque `embedDocuments()` retornaba arrays vacíos.
+Cada una cumple un rol específico en el pipeline:
 
-## next.config.ts
+- **`pdf-parse`** — extrae el texto plano de un archivo PDF.
+- **`@langchain/textsplitters`** — divide ese texto en fragmentos más pequeños (chunks) respetando límites naturales del lenguaje.
+- **`@google/generative-ai`** — convierte los chunks en vectores numéricos (embeddings) y genera las respuestas de texto.
+- **`chromadb`** — guarda y busca los vectores del corpus de forma eficiente.
 
-```typescript
-const nextConfig: NextConfig = {
-  serverExternalPackages: ["pdf-parse"],
-};
-```
+> Los embeddings se generan con el SDK directo de Google, **no** con `@langchain/google-genai`. Esa alternativa fue descartada porque retornaba arrays vacíos.
 
-`pdf-parse` es CommonJS y usa módulos nativos de Node.js; debe excluirse del bundle de Next.js.
+---
 
-## Configuración de embeddings (SDK directo)
-
-```typescript
-import { GoogleGenerativeAI } from "@google/generative-ai";
-
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY!);
-const embeddingModel = genAI.getGenerativeModel({ model: "gemini-embedding-001" });
-
-async function embedTexts(texts: string[]): Promise<number[][]> {
-  return Promise.all(
-    texts.map(t => embeddingModel.embedContent(t).then(r => r.embedding.values))
-  );
-}
-```
-
-> Modelo disponible: `gemini-embedding-001` (3072 dims). `text-embedding-004` no está disponible en esta API key.
-
-## Procesamiento de PDF y chunking
+## Configuración especial de Next.js
 
 ```typescript
-import pdfParse from "pdf-parse";
-import { RecursiveCharacterTextSplitter } from "@langchain/textsplitters";
-
-const pdfData = await pdfParse(buffer);
-const splitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000, chunkOverlap: 200 });
-const chunks = await splitter.createDocuments([pdfData.text]);
+// next.config.ts
+serverExternalPackages: ["pdf-parse"]
 ```
 
-## Store en memoria para borradores
+`pdf-parse` usa módulos nativos de Node.js (CommonJS) que Next.js no puede incluir en su bundle. Esta línea le dice a Next.js que deje `pdf-parse` fuera del empaquetado y lo use directamente desde Node.
 
-```typescript
-interface DraftChunk { text: string; embedding: number[]; }
-interface DraftEntry { displayName: string; chunks: DraftChunk[]; }
-const draftStore = new Map<string, DraftEntry>();
-```
+---
 
-Búsqueda semántica local con cosine similarity:
+## Cómo se generan los embeddings
 
-```typescript
-function cosineSimilarity(a: number[], b: number[]): number { /* ... */ }
+Un **embedding** es una lista de números que representa el significado de un texto. Textos con significado similar producen vectores parecidos, lo que permite buscar por semántica y no solo por palabras clave.
 
-function searchDraftChunks(draftId: string, queryEmbedding: number[], topK: number): string[] {
-  return draftStore.get(draftId)!.chunks
-    .map(c => ({ text: c.text, score: cosineSimilarity(queryEmbedding, c.embedding) }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK)
-    .map(c => c.text);
-}
-```
+Se usa el modelo `gemini-embedding-001`, que produce vectores de 3072 dimensiones. Cada chunk de texto pasa por este modelo antes de guardarse o compararse.
 
-## Gestión de ChromaDB (solo corpus)
+---
 
-```typescript
-import { ChromaClient } from "chromadb";
-const chromaClient = new ChromaClient({ path: "http://localhost:8000" });
+## Chunking: por qué dividir el texto
 
-// Insertar fragmentos del corpus
-const collection = await chromaClient.getOrCreateCollection({ name: "rag_corpus" });
-await collection.add({ ids, embeddings: vectors, metadatas, documents: texts });
+Los modelos tienen un límite de tokens por llamada. Además, buscar dentro de fragmentos pequeños es más preciso que buscar en documentos completos. El `RecursiveCharacterTextSplitter` divide el texto intentando respetar párrafos, oraciones y palabras — nunca corta a la mitad de una idea si puede evitarlo.
 
-// Búsqueda semántica en corpus
-const results = await collection.query({ queryEmbeddings, nResults: 15, where: corpusWhere });
+Configuración usada: chunks de 1000 caracteres con 200 de solapamiento. El solapamiento garantiza que el contexto entre dos chunks consecutivos no se pierda.
 
-// Vaciar corpus
-await chromaClient.deleteCollection({ name: "rag_corpus" });
-```
+---
 
-## Infraestructura local (Docker)
+## Dos almacenamientos distintos
 
-ChromaDB corre vía Docker Compose (`docker-compose.yml`). Arrancar con:
+| Tipo de documento | Dónde se guarda | Por qué |
+|---|---|---|
+| Corpus (propuestas aprobadas) | ChromaDB (Docker, persistente) | Se reutiliza entre sesiones |
+| Borrador (propuesta nueva) | `Map` en memoria RAM | Privacidad; nunca contamina el corpus |
+
+---
+
+## ChromaDB y Docker
+
+ChromaDB es la base de datos vectorial que corre localmente vía Docker. Se accede en `http://localhost:8000`. Los documentos del corpus se almacenan en una colección llamada `rag_corpus`.
+
+Arrancar con:
 
 ```bash
 docker compose up -d
 ```
+
+---
+
+## Server Actions de Next.js
+
+Todas las funciones de `localAi.ts` usan la directiva `"use server"`. Se ejecutan solo en el servidor; la API key y los datos del corpus nunca llegan al navegador.
