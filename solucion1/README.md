@@ -56,11 +56,13 @@ La separación es intencional: `googleAi.ts` nunca corre en el navegador, así q
 
 **1. Crea el archivo de variables de entorno**
 
-```bash
-# En la carpeta solucion1/
-cp .env.example .env.local
-# Edita .env.local y agrega tu API key de Google AI Studio
+Crea un archivo `.env.local` en la carpeta `solucion1/` con tu API key de Google AI Studio:
+
 ```
+GOOGLE_API_KEY=tu_api_key_aqui
+```
+
+Puedes obtener tu API key en [Google AI Studio](https://aistudio.google.com/apikey).
 
 **2. Instala las dependencias**
 

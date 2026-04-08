@@ -66,11 +66,16 @@ solucion2/
 
 **1. Crea el archivo de variables de entorno**
 
-```bash
-# En la carpeta solucion2/
-cp .env.example .env.local
-# Edita .env.local y agrega tu API key de Google AI Studio
+Crea un archivo `.env` o `.env.local` en la raíz de `solucion2/` con el siguiente contenido:
+
+```env
+GOOGLE_API_KEY=tu_api_key_aqui
 ```
+
+> **¿Dónde obtener la API key?**  
+> Ve a [Google AI Studio](https://aistudio.google.com/apikey), inicia sesión con tu cuenta de Google y genera una nueva clave. Cópiala y pégala en lugar de `tu_api_key_aqui`.
+>
+> **`.env` vs `.env.local`:** Next.js carga ambos archivos. Usa `.env.local` para claves personales (está en `.gitignore` por defecto y nunca se sube al repositorio). Usa `.env` solo si quieres compartir valores no secretos con el equipo.
 
 **2. Levanta ChromaDB con Docker**
 
