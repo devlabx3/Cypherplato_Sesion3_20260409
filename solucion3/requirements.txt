@@ -1,0 +1,82 @@
+# Contextual RAG - Dependencias
+
+# ============================================================================
+# BÁSICO (para ejecutar demo simple)
+# ============================================================================
+# Ninguna dependencia requerida para ejecutar 01_CONTEXTUAL_RAG_CODIGO.py
+
+# ============================================================================
+# RECOMENDADO (para producción)
+# ============================================================================
+
+# Orquestación de RAG
+langchain>=0.1.0
+langchain-community>=0.0.1
+langchain-openai>=0.0.1
+
+# Vector stores
+chromadb>=0.4.0
+# O alternativas:
+# pinecone-client>=2.2.0
+# weaviate-client>=3.20.0
+# qdrant-client>=2.4.0
+
+# Embeddings
+sentence-transformers>=2.2.0
+openai>=1.3.0
+
+# Google Gemini
+google-generativeai>=0.3.0
+
+# Utilidades
+python-dotenv>=1.0.0
+requests>=2.31.0
+pydantic>=2.0.0
+
+# Procesamiento de documentos
+pypdf>=3.17.0
+python-docx>=0.8.11
+python-pptx>=0.6.21
+unstructured>=0.11.0
+
+# NLP
+nltk>=3.8.1
+spacy>=3.7.0
+
+# Utilidades
+tqdm>=4.66.0
+httpx>=0.25.0
+
+# ============================================================================
+# DESARROLLO (testing, linting, debugging)
+# ============================================================================
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.1.0
+mypy>=1.7.0
+ipython>=8.0.0
+jupyter>=1.0.0
+
+# ============================================================================
+# OPCIONAL (para específicas integraciones)
+# ============================================================================
+
+# Si usas Ollama local:
+# ollama>=0.1.0
+
+# Si usas Anthropic Claude:
+# anthropic>=0.7.0
+
+# Si usas Hugging Face:
+# huggingface-hub>=0.17.0
+
+# Si usas Azure OpenAI:
+# azure-openai>=0.3.0
+
+# Si usas AWS Bedrock:
+# boto3>=1.28.0
+
+# Monitoreo y logging
+# wandb>=0.15.0
+# comet-ml>=3.38.0
